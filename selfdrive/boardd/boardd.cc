@@ -332,7 +332,6 @@ void panda_state_thread(Panda *&panda, bool spoofing_started) {
     }
 
     ignition_last = ignition;
-    uint16_t fan_speed_rpm = panda->get_fan_speed();
 
     // build msg
     MessageBuilder msg;
@@ -342,33 +341,18 @@ void panda_state_thread(Panda *&panda, bool spoofing_started) {
     auto ps = evt.initPandaState();
     ps.setUptime(pandaState.uptime);
 
-    if (Hardware::TICI()) {
-      double read_time = millis_since_boot();
-      ps.setVoltage(std::atoi(util::read_file("/sys/class/hwmon/hwmon1/in1_input").c_str()));
-      ps.setCurrent(std::atoi(util::read_file("/sys/class/hwmon/hwmon1/curr1_input").c_str()));
-      read_time = millis_since_boot() - read_time;
-      if (read_time > 50) {
-        LOGW("reading hwmon took %lfms", read_time);
-      }
-    } else {
-      ps.setVoltage(pandaState.voltage);
-      ps.setCurrent(pandaState.current);
-    }
 
     ps.setIgnitionLine(pandaState.ignition_line);
     ps.setIgnitionCan(pandaState.ignition_can);
     ps.setControlsAllowed(pandaState.controls_allowed);
     ps.setGasInterceptorDetected(pandaState.gas_interceptor_detected);
-    ps.setHasGps(true);
     ps.setCanRxErrs(pandaState.can_rx_errs);
     ps.setCanSendErrs(pandaState.can_send_errs);
     ps.setCanFwdErrs(pandaState.can_fwd_errs);
     ps.setGmlanSendErrs(pandaState.gmlan_send_errs);
     ps.setPandaType(panda->hw_type);
-    ps.setUsbPowerMode(cereal::PandaState::UsbPowerMode(pandaState.usb_power_mode));
     ps.setSafetyModel(cereal::CarParams::SafetyModel(pandaState.safety_model));
     ps.setSafetyParam(pandaState.safety_param);
-    ps.setFanSpeedRpm(fan_speed_rpm);
     ps.setFaultStatus(cereal::PandaState::FaultStatus(pandaState.fault_status));
     ps.setPowerSaveEnabled((bool)(pandaState.power_save_enabled));
     ps.setHeartbeatLost((bool)(pandaState.heartbeat_lost));
@@ -390,6 +374,44 @@ void panda_state_thread(Panda *&panda, bool spoofing_started) {
     panda->send_heartbeat();
     util::sleep_for(500);
   }
+}
+
+void peripheral_state_thread(Panda *panda) {
+  LOGD("start peripheral state thread");
+  PubMaster pm({"peripheralState"});
+
+  // run at 2hz
+  while (!do_exit && panda->connected) {
+    health_t pandaState = panda->get_state();
+
+    // build msg
+    MessageBuilder msg;
+    auto evt = msg.initEvent();
+    evt.setValid(panda->comms_healthy);
+
+    auto ps = evt.initPeripheralState();
+
+    if (Hardware::TICI()) {
+      double read_time = millis_since_boot();
+      ps.setVoltage(std::atoi(util::read_file("/sys/class/hwmon/hwmon1/in1_input").c_str()));
+      ps.setCurrent(std::atoi(util::read_file("/sys/class/hwmon/hwmon1/curr1_input").c_str()));
+      read_time = millis_since_boot() - read_time;
+      if (read_time > 50) {
+        LOGW("reading hwmon took %lfms", read_time);
+      }
+    } else {
+      ps.setVoltage(pandaState.voltage);
+      ps.setCurrent(pandaState.current);
+    }
+
+    uint16_t fan_speed_rpm = panda->get_fan_speed();
+    ps.setUsbPowerMode(cereal::PeripheralState::UsbPowerMode(pandaState.usb_power_mode));
+    ps.setFanSpeedRpm(fan_speed_rpm);
+
+    pm.send("peripheralState", msg);
+    util::sleep_for(500);
+  }
+
 }
 
 void hardware_control_thread(Panda *panda) {
@@ -414,10 +436,10 @@ void hardware_control_thread(Panda *panda) {
       bool charging_disabled = sm["deviceState"].getDeviceState().getChargingDisabled();
       if (charging_disabled != prev_charging_disabled) {
         if (charging_disabled) {
-          panda->set_usb_power_mode(cereal::PandaState::UsbPowerMode::CLIENT);
+          panda->set_usb_power_mode(cereal::PeripheralState::UsbPowerMode::CLIENT);
           LOGW("TURN OFF CHARGING!\n");
         } else {
-          panda->set_usb_power_mode(cereal::PandaState::UsbPowerMode::CDP);
+          panda->set_usb_power_mode(cereal::PeripheralState::UsbPowerMode::CDP);
           LOGW("TURN ON CHARGING!\n");
         }
         prev_charging_disabled = charging_disabled;
@@ -558,16 +580,21 @@ int main() {
 
   while (!do_exit) {
     Panda *panda = nullptr;
+    Panda *peripheral_panda = nullptr;
+
     std::vector<std::thread> threads;
     threads.emplace_back(panda_state_thread, std::ref(panda), getenv("STARTED") != nullptr);
 
     // connect to the board
-    panda = usb_retry_connect();
+    peripheral_panda = panda = usb_retry_connect();
+
     if (panda != nullptr) {
+      threads.emplace_back(peripheral_state_thread, peripheral_panda);
+      threads.emplace_back(hardware_control_thread, peripheral_panda);
+      threads.emplace_back(pigeon_thread, peripheral_panda);
+
       threads.emplace_back(can_send_thread, panda, getenv("FAKESEND") != nullptr);
       threads.emplace_back(can_recv_thread, panda);
-      threads.emplace_back(hardware_control_thread, panda);
-      threads.emplace_back(pigeon_thread, panda);
     }
 
     for (auto &t : threads) t.join();
