@@ -414,8 +414,8 @@ void peripheral_state_thread(Panda *panda) {
 
 }
 
-void hardware_control_thread(Panda *panda) {
-  LOGD("start hardware control thread");
+void peripheral_control_thread(Panda *panda) {
+  LOGD("start peripheral control thread");
   SubMaster sm({"deviceState", "driverCameraState"});
 
   uint64_t last_front_frame_t = 0;
@@ -590,7 +590,7 @@ int main() {
 
     if (panda != nullptr) {
       threads.emplace_back(peripheral_state_thread, peripheral_panda);
-      threads.emplace_back(hardware_control_thread, peripheral_panda);
+      threads.emplace_back(peripheral_control_thread, peripheral_panda);
       threads.emplace_back(pigeon_thread, peripheral_panda);
 
       threads.emplace_back(can_send_thread, panda, getenv("FAKESEND") != nullptr);
